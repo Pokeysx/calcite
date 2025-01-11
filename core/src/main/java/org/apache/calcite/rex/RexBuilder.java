@@ -246,7 +246,11 @@ public class RexBuilder {
       }
       return new RexInputRef(
           range.getOffset() + field.getIndex(),
-          field.getType());
+          fieldType);
+    }
+
+    if (expr.getType().isNullable()) {
+      fieldType = typeFactory.enforceTypeWithNullability(fieldType, true);
     }
     return new RexFieldAccess(expr, field);
   }
