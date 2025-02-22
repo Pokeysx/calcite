@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 package org.apache.calcite.test;
+
 import org.apache.calcite.config.CalciteConnectionConfigImpl;
 import org.apache.calcite.config.CalciteConnectionProperty;
 import org.apache.calcite.config.NullCollation;
@@ -94,6 +95,13 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
   @Override public SqlToRelFixture fixture() {
     diffRepos = LOCAL_FIXTURE.diffRepos();
     return LOCAL_FIXTURE;
+  }
+
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-6350">[CALCITE-6350]
+   * Unexpected result from UNION with literals expression</a>. */
+  @Test void testUnionLiterals() {
+    final String sql = "select * from (select 'word' i union all select 'w' i) t1 where i='w'";
+    sql(sql).ok();
   }
 
   @Test void testDotLiteralAfterNestedRow() {
@@ -250,6 +258,15 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
   }
 
   /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6770">[CALCITE-6770]
+   * Preserve column names when casts are inserted in projects</a>. */
+  @Test void testCastNames() {
+    final String sql = "SELECT * FROM (SELECT empno, 'x' AS X FROM emp) "
+        + "UNION ALL (SELECT empno, 'xx' AS X from emp)";
+    sql(sql).ok();
+  }
+
+  /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-245">[CALCITE-245]
    * Off-by-one translation of ON clause of JOIN</a>. */
   @Test void testConditionOffByOne() {
@@ -290,7 +307,7 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
    */
   @Test void testAsOfCast() {
     final String sql = "SELECT * "
-        + "FROM (SELECT deptno % 10 as m, CAST(deptno AS BIGINT) as deptno FROM dept) D\n"
+        + "FROM (SELECT CAST(deptno % 10 AS BIGINT) as m, CAST(deptno AS BIGINT) as deptno FROM dept) D\n"
         + "LEFT ASOF JOIN (SELECT CAST(empno as BIGINT) as empno, CAST(deptno AS BIGINT) AS deptno FROM emp) E\n"
         + "MATCH_CONDITION D.deptno >= E.deptno\n"
         + "ON D.m = E.empno";
@@ -455,6 +472,37 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
         .withConformance(SqlConformanceEnum.LENIENT).ok();
   }
 
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-4512">[CALCITE-4512]
+   * GROUP BY expression with argument name same with SELECT field and alias causes
+   * validation error</a>.
+   */
+  @Test void testGroupByExprArgFieldSameWithAlias() {
+    final String sql = "SELECT floor(deptno / 2) AS deptno\n"
+        + "FROM emp\n"
+        + "GROUP BY floor(deptno / 2)";
+    sql(sql)
+        .withConformance(SqlConformanceEnum.LENIENT)
+        .ok();
+  }
+
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-4512">[CALCITE-4512]
+   * GROUP BY expression with argument name same with SELECT field and alias causes
+   * validation error</a>.
+   */
+  @Test void testGroupByExprArgFieldSameWithAlias2() {
+    final String sql = "SELECT deptno / 2 AS deptno, deptno / 2 as empno, sum(sal)\n"
+        + "FROM emp\n"
+        + "GROUP BY GROUPING SETS "
+        + "((deptno), (empno, deptno / 2), (2, 1), ((1, 2), (deptno, deptno / 2)))";
+    sql(sql)
+        .withConformance(SqlConformanceEnum.LENIENT)
+        .ok();
+  }
+
   @Test void testAliasInHaving() {
     sql("select count(empno) as e from emp having e > 1")
         .withConformance(SqlConformanceEnum.LENIENT).ok();
@@ -481,6 +529,16 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
     // just one agg
     final String sql =
         "select deptno, sum(sal) as sum_sal from emp group by deptno";
+    sql(sql).ok();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-4549">[CALCITE-4549]
+   * IndexOutOfBoundsException when group view by a sub query</a>. */
+  @Test void testGroupView() {
+    final String sql = "SELECT case when ENAME in( 'a', 'b') then 'c' else 'd' end\n"
+        + "from EMP_20\n"
+        + "group by case when ENAME in( 'a', 'b') then 'c' else 'd' end";
     sql(sql).ok();
   }
 
@@ -800,6 +858,23 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
     final String sql = "select SUM(DISTINCT deptno)\n"
         + "over (ORDER BY empno ROWS BETWEEN 10 PRECEDING AND CURRENT ROW)\n"
         + "from emp\n";
+    sql(sql).ok();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6742">[CALCITE-6742]
+   * StandardConvertletTable.convertCall loses casts from ROW comparisons</a>. */
+  @Test void testStructCast() {
+    final String sql = "select ROW(1, 'x') = ROW('y', 1)";
+    sql(sql).ok();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6742">[CALCITE-6742]
+   * StandardConvertletTable.convertCall loses casts from ROW comparisons</a>. */
+  @Test void testStructCast1() {
+    final String sql = "select CAST(CAST(ROW('x', 1) AS "
+        + "ROW(l INTEGER, r DOUBLE)) AS ROW(l BIGINT, r INTEGER)) = ROW(RAND(), RAND())";
     sql(sql).ok();
   }
 
@@ -1981,6 +2056,16 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
     final String sql = "select empno from emp where deptno not in"
         + " (select deptno from dept)";
     sql(sql).withExpand(false).ok();
+  }
+
+  /**
+   * Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5532">[CALCITE-5532]
+   * CompositeOperandTypeChecker should check operands without type coercion first</a>.
+   */
+  @Test void testNoTypeCoercionForExactMatchInCompositeTypeChecker() {
+    String sql = "SELECT COMPARE_STRINGS_OR_NUMERIC_VALUES(1, 1)";
+    sql(sql).ok();
   }
 
   @Test void testNotCaseInThreeClause() {
@@ -3581,6 +3666,30 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
         .ok();
   }
 
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6691">[CALCITE-6691]
+   * QUALIFY on subquery that projects</a>. */
+  @Test void testQualifyOnProject() {
+    sql("WITH t0 AS (SELECT deptno, sal FROM emp),\n"
+        + "t1 AS (SELECT deptno\n"
+        + "    FROM t0\n"
+        + "    QUALIFY row_number() OVER (PARTITION BY deptno\n"
+        + "                               ORDER BY sal DESC) = 1)\n"
+        + "SELECT deptno FROM t1")
+        .ok();
+  }
+
+  @Test void testQualifyAfterGroupBy() {
+    sql("WITH t0 AS (SELECT deptno, sal FROM emp),\n"
+        + "t1 AS (SELECT deptno, sal, COUNT(*)\n"
+        + "    FROM t0\n"
+        + "    GROUP BY deptno, sal\n"
+        + "    QUALIFY row_number() OVER (PARTITION BY deptno\n"
+        + "                               ORDER BY COUNT(*) DESC) = 1)\n"
+        + "SELECT deptno FROM t1")
+        .ok();
+  }
+
   @Test void testQualifyWithWindowClause() {
     sql("SELECT empno, ename, SUM(deptno) OVER myWindow as sumDeptNo\n"
         + "FROM emp\n"
@@ -4140,6 +4249,23 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
   @Test void testSelectDynamicStarOrderBy() {
     final String sql = "SELECT * from SALES.NATION order by n_nationkey";
     sql(sql).withDynamicTable().ok();
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-5156">[CALCITE-5156]
+   * Support implicit integer types cast for IN Sub-query</a>. */
+  @Test void testInSubQueryWithTypeCast() {
+    final String sql = "select *\n"
+        + "from dept\n"
+        + "where cast(deptno + 20 as bigint) in (select deptno from dept)";
+    sql(sql).withExpand(false).ok();
+  }
+
+  @Test void testInSubQueryWithTypeCast2() {
+    final String sql = "select *\n"
+        + "from dept\n"
+        + "where cast(deptno as bigint) in (select deptno + 20 from dept)";
+    sql(sql).withExpand(false).ok();
   }
 
   /** Test case for
@@ -4780,6 +4906,15 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
     sql(sql).ok();
   }
 
+  /** Test case for <a href="https://issues.apache.org/jira/browse/CALCITE-6413">[CALCITE-6413]
+   * SqlValidator does not invoke TypeCoercionImpl::binaryComparisonCoercion for both NATURAL
+   * and USING join conditions</a>. */
+  @Test void testNaturalJoinCast() {
+    final String sql = "WITH t1(x) AS (VALUES('x')), t2(x) AS (VALUES(0.0))\n"
+        + "SELECT * FROM t1 NATURAL JOIN t2";
+    sql(sql).ok();
+  }
+
   /** Tests LEFT JOIN LATERAL with multiple columns from outer. */
   @Test void testLeftJoinLateral4() {
     final String sql = "select * from (values (4,5)) as t(c,d)\n"
@@ -5058,6 +5193,22 @@ class SqlToRelConverterTest extends SqlToRelTestBase {
     final String sql = "select * from (select empno from emp order by empno)";
     sql(sql).convertsTo("${planRemoveSort}");
     sql(sql).withConfig(c -> c.withRemoveSortInSubQuery(false)).convertsTo("${planKeepSort}");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6759">[CALCITE-6759]
+   * SqlToRelConverter should not remove ORDER BY in subquery if it has an
+   * OFFSET</a>.
+   *
+   * <p>While an ORDER BY on its own can be ignored, an ORDER BY with an OFFSET
+   * or FETCH cannot be removed from the subquery without changing the
+   * semantics. */
+  @Test void testSortWithOffsetInSubQuery() {
+    final String sql = "select count(*) from (\n"
+        + "  select *\n"
+        + "  from emp\n"
+        + "  order by empno offset 10)";
+    sql(sql).ok();
   }
 
   @Test void testTrimUnionAll() {

@@ -106,9 +106,6 @@
 #
 # pluralInterval - allow INTERVAL '2' DAYS as well as INTERVAL '2' DAY; [CALCITE-3383]
 #
-# TODO:
-#  * Why does CONCAT not work?
-#
 !use scott-redshift
 !set outputformat csv
 
@@ -921,7 +918,7 @@ EXPR$0
 select nvl2(comm, sal, sal + 10) from emp where deptno = 30;
 SELECT "NVL2"("EMP"."COMM", "EMP"."SAL", "EMP"."SAL" + 10)
 FROM "scott"."EMP" AS "EMP"
-WHERE "EMP"."DEPTNO" = 30
+WHERE CAST("EMP"."DEPTNO" AS INTEGER) = 30
 !explain-validated-on calcite
 
 # NULLIF
@@ -1748,8 +1745,9 @@ A
 
 # CONCAT (Oracle Compatibility Function)
 select concat('a', 'b');
-SELECT "CONCAT"('a', 'b')
-!explain-validated-on calcite
+EXPR$0
+ab
+!ok
 
 # CRC32
 -- returns 'f2726906'

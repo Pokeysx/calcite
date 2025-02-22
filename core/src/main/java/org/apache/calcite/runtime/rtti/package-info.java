@@ -14,23 +14,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.calcite.sql.babel.postgresql;
-
-import org.apache.calcite.sql.Symbolizable;
 
 /**
- * Defines the keywords that can occur immediately after the "ROLLBACK" or "COMMIT" keywords.
- *
- * @see SqlCommit
- * @see SqlRollback
- * @see <a href="https://www.postgresql.org/docs/current/sql-commit.html">COMMIT specification</a>
- * @see <a href="https://www.postgresql.org/docs/current/sql-rollback.html">ROLLBACK specification</a>
+ * Support for runtime type information.
  */
-public enum AndChain implements Symbolizable {
-  AND_CHAIN,
-  AND_NO_CHAIN;
-
-  @Override public String toString() {
-    return super.toString().replace("_", " ");
-  }
-}
+package org.apache.calcite.runtime.rtti;

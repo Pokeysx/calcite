@@ -14,8 +14,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+package org.apache.calcite.adapter.jdbc;
+
+import org.apache.calcite.rel.core.CorrelationId;
+
+import java.lang.reflect.Type;
 
 /**
- * Parse tree for PostgreSQL extensions used by the Babel parser.
+ * An interface to collect all correlation variables
+ * required to create a JdbcCorrelationDataContext.
  */
-package org.apache.calcite.sql.babel.postgresql;
+interface JdbcCorrelationDataContextBuilder {
+  /**
+   * Collect a correlation variable.
+   */
+  int add(CorrelationId id, int ordinal, Type type);
+}

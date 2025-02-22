@@ -571,11 +571,13 @@ public class SqlParserTest {
       "USAGE",                         "92", "99",
       "USER",                          "92", "99", "2003", "2011", "2014", "c",
       "USING",                         "92", "99", "2003", "2011", "2014", "c",
+      "UUID",                                                              "c",
       "VALUE",                         "92", "99", "2003", "2011", "2014", "c",
       "VALUES",                        "92", "99", "2003", "2011", "2014", "c",
       "VALUE_OF",                                                  "2014", "c",
       "VARBINARY",                                         "2011", "2014", "c",
       "VARCHAR",                       "92", "99", "2003", "2011", "2014", "c",
+      "VARIANT",                                                           "c",
       "VARYING",                       "92", "99", "2003", "2011", "2014", "c",
       "VAR_POP",                                           "2011", "2014", "c",
       "VAR_SAMP",                                          "2011", "2014", "c",
@@ -5701,8 +5703,14 @@ public class SqlParserTest {
         .ok("TRIM(BOTH ' ' FROM ((COALESCE(CAST(NULL AS VARCHAR(2))) || "
             + "' ') || COALESCE('junk ', '')))");
 
-    sql("trim(^from^ 'beard')")
-        .fails("(?s).*'FROM' without operands preceding it is illegal.*");
+    expr("trim(^from^ 'beard')")
+        .fails("(?s).*Encountered \"from\" at line 1, column 6\\..*");
+    expr("trim('beard ')")
+        .ok("TRIM(BOTH ' ' FROM 'beard ')");
+    // Test case for [CALCITE-6709] https://issues.apache.org/jira/browse/CALCITE-6709
+    // Parser accepts a call to TRIM() with no arguments
+    expr("trim(^)^")
+        .fails("(?s).*Encountered \"\\)\" at line 1, column 6\\..*");
   }
 
   @Test void testConvertAndTranslate() {
@@ -5732,6 +5740,19 @@ public class SqlParserTest {
         .ok("SELECT TRANSLATE(`COL` USING `UTF8`)\n"
             + "FROM (SELECT 'a' AS `COL`\n"
             + "FROM (VALUES (ROW(TRUE))))");
+  }
+
+  @Test void testConvertOracle() {
+    // If there are 3 params in CONVERT_ORACLE operator, it's valid when
+    // the ORACLE function library is enabled ('fun=oracle').
+    // But the parser can always parse it.
+    expr("convert('abc', utf8, gbk)")
+        .ok("CONVERT('abc', `UTF8`, `GBK`)");
+    expr("convert('abc', utf8)")
+        .ok("CONVERT('abc', `UTF8`)");
+    sql("select convert(name, latin1) as newName from t")
+        .ok("SELECT CONVERT(`NAME`, `LATIN1`) AS `NEWNAME`\n"
+            + "FROM `T`");
   }
 
   @Test void testTranslate3() {
@@ -7793,7 +7814,7 @@ public class SqlParserTest {
     SqlSetOption opt = (SqlSetOption) node;
     assertThat(opt.getScope(), equalTo("SYSTEM"));
     SqlPrettyWriter writer = new SqlPrettyWriter();
-    assertThat(writer.format(opt.getName()), equalTo("\"SCHEMA\""));
+    assertThat(writer.format(opt.name()), equalTo("\"SCHEMA\""));
     writer = new SqlPrettyWriter();
     assertThat(writer.format(opt.getValue()), equalTo("TRUE"));
     writer = new SqlPrettyWriter();
@@ -7825,7 +7846,7 @@ public class SqlParserTest {
     opt = (SqlSetOption) node;
     assertThat(opt.getScope(), equalTo(null));
     writer = new SqlPrettyWriter();
-    assertThat(writer.format(opt.getName()), equalTo("\"SCHEMA\""));
+    assertThat(writer.format(opt.name()), equalTo("\"SCHEMA\""));
     assertThat(opt.getValue(), equalTo(null));
     writer = new SqlPrettyWriter();
     assertThat(writer.format(opt),

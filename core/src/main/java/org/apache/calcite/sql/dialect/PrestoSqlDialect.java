@@ -20,8 +20,13 @@ import org.apache.calcite.avatica.util.Casing;
 import org.apache.calcite.config.NullCollation;
 import org.apache.calcite.rel.type.RelDataType;
 import org.apache.calcite.rel.type.RelDataTypeSystem;
+import org.apache.calcite.rex.RexCall;
+import org.apache.calcite.rex.RexNode;
+import org.apache.calcite.rex.RexUtil;
 import org.apache.calcite.sql.SqlBasicCall;
+import org.apache.calcite.sql.SqlBasicTypeNameSpec;
 import org.apache.calcite.sql.SqlCall;
+import org.apache.calcite.sql.SqlDataTypeSpec;
 import org.apache.calcite.sql.SqlDialect;
 import org.apache.calcite.sql.SqlIntervalQualifier;
 import org.apache.calcite.sql.SqlKind;
@@ -29,9 +34,12 @@ import org.apache.calcite.sql.SqlLiteral;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlWriter;
 import org.apache.calcite.sql.fun.SqlArrayValueConstructor;
+import org.apache.calcite.sql.fun.SqlLibraryOperators;
 import org.apache.calcite.sql.fun.SqlMapValueConstructor;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.type.SqlTypeUtil;
 import org.apache.calcite.util.RelToSqlConverterUtil;
 
 import com.google.common.collect.ImmutableList;
@@ -83,6 +91,17 @@ public class PrestoSqlDialect extends SqlDialect {
     unparseUsingLimit(writer, offset, fetch);
   }
 
+  @Override public boolean supportsImplicitTypeCoercion(RexCall call) {
+    RexNode rexNode = call.getOperands().get(0);
+    return super.supportsImplicitTypeCoercion(call)
+        && RexUtil.isLiteral(rexNode, false)
+        && (rexNode.getType().getSqlTypeName() == SqlTypeName.VARCHAR
+        || rexNode.getType().getSqlTypeName() == SqlTypeName.CHAR)
+        && !SqlTypeUtil.isNumeric(call.type)
+        && !SqlTypeUtil.isDate(call.type)
+        && !SqlTypeUtil.isTimestamp(call.type);
+  }
+
   /** Unparses offset/fetch using "OFFSET offset LIMIT fetch " syntax. */
   private static void unparseUsingLimit(SqlWriter writer, @Nullable SqlNode offset,
       @Nullable SqlNode fetch) {
@@ -129,7 +148,18 @@ public class PrestoSqlDialect extends SqlDialect {
   }
 
   @Override public @Nullable SqlNode getCastSpec(RelDataType type) {
-    return super.getCastSpec(type);
+    switch (type.getSqlTypeName()) {
+    // PRESTO only supports REAL、DOUBLE for floating point types.
+    case FLOAT:
+      return new SqlDataTypeSpec(
+          new SqlBasicTypeNameSpec(SqlTypeName.DOUBLE, SqlParserPos.ZERO), SqlParserPos.ZERO);
+    // https://prestodb.io/docs/current/language/types.html#varbinary
+    case BINARY:
+      return new SqlDataTypeSpec(
+          new SqlBasicTypeNameSpec(SqlTypeName.VARBINARY, SqlParserPos.ZERO), SqlParserPos.ZERO);
+    default:
+      return super.getCastSpec(type);
+    }
   }
 
   @Override public void unparseCall(SqlWriter writer, SqlCall call,
@@ -144,6 +174,11 @@ public class PrestoSqlDialect extends SqlDialect {
       switch (call.getKind()) {
       case MAP_VALUE_CONSTRUCTOR:
         unparseMapValue(writer, call, leftPrec, rightPrec);
+        break;
+      case CHAR_LENGTH:
+        SqlCall lengthCall = SqlLibraryOperators.LENGTH
+            .createCall(SqlParserPos.ZERO, call.getOperandList());
+        super.unparseCall(writer, lengthCall, leftPrec, rightPrec);
         break;
       default:
         // Current impl is same with Postgresql.

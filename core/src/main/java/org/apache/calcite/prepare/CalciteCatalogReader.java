@@ -49,6 +49,7 @@ import org.apache.calcite.sql.type.SqlReturnTypeInference;
 import org.apache.calcite.sql.type.SqlTypeFamily;
 import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.util.SqlOperatorTables;
+import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.sql.validate.SqlMoniker;
 import org.apache.calcite.sql.validate.SqlMonikerImpl;
 import org.apache.calcite.sql.validate.SqlMonikerType;
@@ -275,7 +276,7 @@ public class CalciteCatalogReader implements Prepare.CatalogReader {
     getFunctionsFrom(opName.names)
         .stream()
         .filter(predicate)
-        .map(function -> toOp(opName, function))
+        .map(function -> toOp(opName, function, config))
         .forEachOrdered(operatorList::add);
   }
 
@@ -296,7 +297,7 @@ public class CalciteCatalogReader implements Prepare.CatalogReader {
     for (String name : schema.getFunctionNames()) {
       schema.getFunctions(name, true).forEach(function -> {
         final SqlIdentifier id = new SqlIdentifier(name, SqlParserPos.ZERO);
-        list.add(toOp(id, function));
+        list.add(toOp(id, function, CalciteConnectionConfig.DEFAULT));
       });
     }
     return SqlOperatorTables.of(list);
@@ -304,7 +305,7 @@ public class CalciteCatalogReader implements Prepare.CatalogReader {
 
   /** Converts a function to a {@link org.apache.calcite.sql.SqlOperator}. */
   private static SqlOperator toOp(SqlIdentifier name,
-      final org.apache.calcite.schema.Function function) {
+      final org.apache.calcite.schema.Function function, CalciteConnectionConfig config) {
     final Function<RelDataTypeFactory, List<RelDataType>> argTypesFactory =
         typeFactory -> function.getParameters()
             .stream()
@@ -344,8 +345,9 @@ public class CalciteCatalogReader implements Prepare.CatalogReader {
     if (function instanceof ScalarFunction) {
       final SqlReturnTypeInference returnTypeInference =
           infer((ScalarFunction) function);
+      SqlSyntax syntax = getSqlSyntax(function, config);
       return new SqlUserDefinedFunction(name, kind, returnTypeInference,
-          operandTypeInference, operandMetadata, function);
+          operandTypeInference, operandMetadata, function, syntax);
     } else if (function instanceof AggregateFunction) {
       final SqlReturnTypeInference returnTypeInference =
           infer((AggregateFunction) function);
@@ -362,6 +364,20 @@ public class CalciteCatalogReader implements Prepare.CatalogReader {
     } else {
       throw new AssertionError("unknown function type " + function);
     }
+  }
+
+  private static SqlSyntax getSqlSyntax(org.apache.calcite.schema.Function function,
+      CalciteConnectionConfig config) {
+    if (!function.getParameters().isEmpty()) {
+      return SqlSyntax.FUNCTION;
+    }
+    // Keep compatible with both Foo() and Foo function syntax for Calcite's default conformance
+    if (SqlConformanceEnum.DEFAULT == config.conformance()) {
+      return SqlSyntax.FUNCTION_ID_CONSTANT;
+    }
+    return config.conformance().allowNiladicParentheses()
+        ? SqlSyntax.FUNCTION
+        : SqlSyntax.FUNCTION_ID;
   }
 
   /** Deduces the {@link org.apache.calcite.sql.SqlKind} of a user-defined
@@ -423,7 +439,7 @@ public class CalciteCatalogReader implements Prepare.CatalogReader {
       if (schema != null) {
         for (String name : schema.getFunctionNames()) {
           schema.getFunctions(name, true).forEach(f ->
-              builder.add(toOp(new SqlIdentifier(name, SqlParserPos.ZERO), f)));
+              builder.add(toOp(new SqlIdentifier(name, SqlParserPos.ZERO), f, config)));
         }
       }
     }

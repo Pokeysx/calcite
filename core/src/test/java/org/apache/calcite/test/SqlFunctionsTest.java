@@ -50,6 +50,7 @@ import static org.apache.calcite.runtime.SqlFunctions.concatMultiTypeWithSeparat
 import static org.apache.calcite.runtime.SqlFunctions.concatMultiWithNull;
 import static org.apache.calcite.runtime.SqlFunctions.concatMultiWithSeparator;
 import static org.apache.calcite.runtime.SqlFunctions.concatWithNull;
+import static org.apache.calcite.runtime.SqlFunctions.convertOracle;
 import static org.apache.calcite.runtime.SqlFunctions.fromBase64;
 import static org.apache.calcite.runtime.SqlFunctions.greater;
 import static org.apache.calcite.runtime.SqlFunctions.initcap;
@@ -62,6 +63,7 @@ import static org.apache.calcite.runtime.SqlFunctions.ltrim;
 import static org.apache.calcite.runtime.SqlFunctions.md5;
 import static org.apache.calcite.runtime.SqlFunctions.overlay;
 import static org.apache.calcite.runtime.SqlFunctions.position;
+import static org.apache.calcite.runtime.SqlFunctions.replace;
 import static org.apache.calcite.runtime.SqlFunctions.rtrim;
 import static org.apache.calcite.runtime.SqlFunctions.sha1;
 import static org.apache.calcite.runtime.SqlFunctions.sha256;
@@ -319,6 +321,11 @@ class SqlFunctionsTest {
     assertThat(concatMultiObjectWithSeparator("abc", null, null), is(""));
   }
 
+  @Test void testConvertOracle() {
+    assertThat(convertOracle("a", "UTF8", "LATIN1"), is("a"));
+    assertThat(convertOracle("a", "UTF8"), is("a"));
+  }
+
   @Test void testPosixRegex() {
     final SqlFunctions.PosixRegexFunction f =
         new SqlFunctions.PosixRegexFunction();
@@ -552,6 +559,18 @@ class SqlFunctionsTest {
     }
   }
 
+  @Test void testReplace() {
+    assertThat(replace("", "ciao", "ci", true), is(""));
+    assertThat(replace("ciao", "ciao", "", true), is(""));
+    assertThat(replace("ciao", "", "ciao", true), is("ciao"));
+    assertThat(replace("ci ao", " ", "ciao", true), is("ciciaoao"));
+    assertThat(replace("ciAao", "a", "ciao", true), is("ciAciaoo"));
+    assertThat(replace("ciAao", "A", "ciao", true), is("ciciaoao"));
+    assertThat(replace("ciAao", "a", "ciao", false), is("ciciaociaoo"));
+    assertThat(replace("ciAao", "A", "ciao", false), is("ciciaociaoo"));
+    assertThat(replace("hello world", "o", "", true), is("hell wrld"));
+  }
+
   @Test void testRegexpReplace() {
     final SqlFunctions.RegexFunction f = new SqlFunctions.RegexFunction();
     assertThat(f.regexpReplace("abc", "b"), is("ac"));
@@ -719,12 +738,7 @@ class SqlFunctionsTest {
   @Test void testLesser() {
     assertThat(lesser("a", "bc"), is("a"));
     assertThat(lesser("bc", "ac"), is("ac"));
-    try {
-      Object o = lesser("a", null);
-      fail("Expected NPE, got " + o);
-    } catch (NullPointerException e) {
-      // ok
-    }
+    assertThat(lesser("a", null), is("a"));
     assertThat(lesser(null, "a"), is("a"));
     assertThat(lesser((String) null, null), nullValue());
   }
@@ -732,12 +746,7 @@ class SqlFunctionsTest {
   @Test void testGreater() {
     assertThat(greater("a", "bc"), is("bc"));
     assertThat(greater("bc", "ac"), is("bc"));
-    try {
-      Object o = greater("a", null);
-      fail("Expected NPE, got " + o);
-    } catch (NullPointerException e) {
-      // ok
-    }
+    assertThat(greater("a", null), is("a"));
     assertThat(greater(null, "a"), is("a"));
     assertThat(greater((String) null, null), nullValue());
   }
@@ -1053,6 +1062,22 @@ class SqlFunctionsTest {
     assertThat("long delimiter (occurs at end)",
         SqlFunctions.split(sabracadabrab, ab),
         is(list(s, racad, r, empty)));
+  }
+
+  @Test void testSplitPart() {
+    assertThat(SqlFunctions.splitPart("abc~@~def~@~ghi", "~@~", 2), is("def"));
+    assertThat(SqlFunctions.splitPart("abc,def,ghi,jkl", ",", -2), is("ghi"));
+
+    assertThat(SqlFunctions.splitPart("abc,,ghi", ",", 2), is(""));
+    assertThat(SqlFunctions.splitPart("", ",", 1), is(""));
+    assertThat(SqlFunctions.splitPart("abc", "", 1), is(""));
+
+    assertThat(SqlFunctions.splitPart(null, ",", 1), is(""));
+    assertThat(SqlFunctions.splitPart("abc,def", null, 1), is(""));
+    assertThat(SqlFunctions.splitPart("abc,def", ",", 0), is(""));
+
+    assertThat(SqlFunctions.splitPart("abc,def", ",", 3), is(""));
+    assertThat(SqlFunctions.splitPart("abc,def", ",", -3), is(""));
   }
 
   @Test void testByteString() {

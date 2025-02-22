@@ -179,24 +179,29 @@ public class ArrowTable extends AbstractTable
     final RelDataTypeFactory.Builder builder = typeFactory.builder();
     for (Field field : schema.getFields()) {
       builder.add(field.getName(),
-          ArrowFieldType.of(field.getType()).toType(typeFactory));
+          ArrowFieldTypeFactory.toType(field.getType(), typeFactory));
     }
     return builder.build();
   }
 
   private static TreeNode makeLiteralNode(String literal, String type) {
-    switch (type) {
-    case "integer":
+    if (type.startsWith("decimal")) {
+      String[] typeParts =
+          type.substring(type.indexOf('(') + 1, type.indexOf(')')).split(",");
+      int precision = parseInt(typeParts[0]);
+      int scale = parseInt(typeParts[1]);
+      return TreeBuilder.makeDecimalLiteral(literal, precision, scale);
+    } else if (type.equals("integer")) {
       return TreeBuilder.makeLiteral(parseInt(literal));
-    case "long":
+    } else if (type.equals("long")) {
       return TreeBuilder.makeLiteral(parseLong(literal));
-    case "float":
+    } else if (type.equals("float")) {
       return TreeBuilder.makeLiteral(parseFloat(literal));
-    case "double":
+    } else if (type.equals("double")) {
       return TreeBuilder.makeLiteral(parseDouble(literal));
-    case "string":
+    } else if (type.equals("string")) {
       return TreeBuilder.makeStringLiteral(literal.substring(1, literal.length() - 1));
-    default:
+    } else {
       throw new IllegalArgumentException("Invalid literal " + literal
           + ", type " + type);
     }

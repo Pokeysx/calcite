@@ -103,9 +103,6 @@ public interface CalciteResource {
   @BaseMessage("Illegal array expression ''{0}''")
   ExInst<CalciteException> illegalArrayExpression(String a0);
 
-  @BaseMessage("''FROM'' without operands preceding it is illegal")
-  ExInst<CalciteException> illegalFromEmpty();
-
   @BaseMessage("ROW expression encountered in illegal context")
   ExInst<CalciteException> illegalRowExpression();
 
@@ -167,7 +164,7 @@ public interface CalciteResource {
   @BaseMessage("Values in expression list must have compatible types")
   ExInst<SqlValidatorException> incompatibleTypesInList();
 
-  @BaseMessage("Cannot apply {0} to the two different charsets {1} and {2}")
+  @BaseMessage("Cannot apply operation ''{0}'' to strings with different charsets ''{1}'' and ''{2}''")
   ExInst<SqlValidatorException> incompatibleCharset(String a0, String a1,
       String a2);
 
@@ -502,7 +499,7 @@ public interface CalciteResource {
   @BaseMessage("QUALIFY expression ''{0}'' must contain a window function")
   ExInst<SqlValidatorException> qualifyExpressionMustContainWindowFunction(String a0);
 
-  @BaseMessage("ROW/RANGE not allowed with RANK, DENSE_RANK, ROW_NUMBER or PERCENTILE_CONT/DISC functions")
+  @BaseMessage("ROW/RANGE not allowed with RANK, DENSE_RANK, ROW_NUMBER, PERCENTILE_CONT/DISC or LAG/LEAD functions")
   ExInst<SqlValidatorException> rankWithFrame();
 
   @BaseMessage("RANK or DENSE_RANK functions require ORDER BY clause in window specification")
@@ -951,8 +948,8 @@ public interface CalciteResource {
   @BaseMessage("Illegal arguments: The length of the keys array {0,number,#} is not equal to the length of the values array {1,number,#} in MAP_FROM_ARRAYS function")
   ExInst<CalciteException> illegalArgumentsInMapFromArraysFunc(int arg0, int arg1);
 
-  @BaseMessage("Trim error: trim character must be exactly 1 character")
-  ExInst<CalciteException> trimError();
+  @BaseMessage("Invalid argument ''{0}'': the length of the string describing the trimmed character must be 1")
+  ExInst<CalciteException> trimError(String seek);
 
   @BaseMessage("Invalid types for arithmetic: {0} {1} {2}")
   ExInst<CalciteException> invalidTypesForArithmetic(String clazzName0, String op,

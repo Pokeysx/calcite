@@ -47,7 +47,6 @@ import org.apache.calcite.linq4j.Linq4j;
 import org.apache.calcite.linq4j.Ord;
 import org.apache.calcite.linq4j.QueryProvider;
 import org.apache.calcite.linq4j.Queryable;
-import org.apache.calcite.linq4j.function.Function0;
 import org.apache.calcite.plan.RelOptPlanner;
 import org.apache.calcite.plan.RelOptUtil;
 import org.apache.calcite.prepare.CalcitePrepareImpl;
@@ -85,6 +84,7 @@ import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.parser.impl.SqlParserImpl;
 import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.validate.SqlConformanceEnum;
 import org.apache.calcite.sql2rel.SqlToRelConverter.Config;
 import org.apache.calcite.test.schemata.catchall.CatchallSchema;
 import org.apache.calcite.test.schemata.foodmart.FoodmartSchema;
@@ -576,6 +576,21 @@ public class JdbcTest {
   }
 
   /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-4590">[CALCITE-4590]
+   * Incorrect query result with fixed-length string</a>. */
+  @Test void testTrimLiteral() {
+    CalciteAssert.that()
+        .query("with t(x, y) as (values (1, 'a'), (2, 'abc'))"
+            + "select * from t where y = 'a'")
+        .returns("X=1; Y=a  \n");
+    CalciteAssert.that()
+        .query("with t(x, y) as (values (1, 'a'), (2, 'abc'))"
+            + "select * from t where y = 'a' or y = 'abc'")
+        .returns("X=1; Y=a  \n"
+            + "X=2; Y=abc\n");
+  }
+
+  /** Test case for
    * <a href="https://issues.apache.org/jira/browse/CALCITE-3423">[CALCITE-3423]
    * Support using CAST operation and BOOLEAN type value in table macro</a>. */
   @Test void testTableMacroWithCastOrBoolean() throws SQLException {
@@ -887,17 +902,7 @@ public class JdbcTest {
     checkMockDdl(counter, true,
         driver2.withPrepareFactory(() -> new CountingPrepare(counter)));
 
-    // MockDdlDriver2 implements commit if we override its createPrepareFactory
-    // method. The method is deprecated but override still needs to work.
-    checkMockDdl(counter, true,
-        new MockDdlDriver2(counter) {
-          @SuppressWarnings("deprecation")
-          @Override protected Function0<CalcitePrepare> createPrepareFactory() {
-            return () -> new CountingPrepare(counter);
-          }
-        });
-
-    // MockDdlDriver2 implements commit if we override its createPrepareFactory
+    // MockDdlDriver2 implements commit if we override its createPrepare
     // method.
     checkMockDdl(counter, true,
         new MockDdlDriver2(counter) {
@@ -3053,32 +3058,40 @@ public class JdbcTest {
     final String extra;
     switch (format) {
     case "text":
-      expected = "EnumerableAggregate(group=[{0, 3}])\n"
-          + "  EnumerableCalc(expr#0..1=[{inputs}], expr#2=[10], expr#3=['SameName'], expr#4=[CAST($t1):INTEGER NOT NULL], expr#5=[=($t4, $t2)], proj#0..3=[{exprs}], $condition=[$t5])\n"
-          + "    EnumerableTableScan(table=[[SALES, EMPS]])\n\n";
+      expected = "EnumerableCalc(expr#0=[{inputs}], expr#1=['SameName'], proj#0..1=[{exprs}])\n"
+          + "  EnumerableAggregate(group=[{0}])\n"
+          + "    EnumerableCalc(expr#0..1=[{inputs}], expr#2=[CAST($t1):INTEGER NOT NULL], expr#3=[10], expr#4=[=($t2, $t3)], proj#0..1=[{exprs}], $condition=[$t4])\n"
+          + "      EnumerableTableScan(table=[[SALES, EMPS]])\n\n";
       extra = "";
       break;
     case "dot":
       expected = "PLAN=digraph {\n"
+          + "\"EnumerableAggregate\\n"
+          + "group = {0}\\n"
+          + "\" -> \"EnumerableCalc\\n"
+          + "expr#0 = {inputs}\\n"
+          + "expr#1 = 'SameName'\\n"
+          + "proj#0..1 = {exprs}\\n"
+          + "\" [label=\"0\"]\n"
           + "\"EnumerableCalc\\n"
           + "expr#0..1 = {inputs}\\n"
-          + "expr#2 = 10\\n"
-          + "expr#3 = 'SameName'\\n"
-          + "expr#4 = CAST($t1):I\\n"
+          + "expr#2 = CAST($t1):I\\n"
           + "NTEGER NOT NULL\\n"
+          + "expr#3 = 10\\n"
+          + "expr#4 = =($t2, $t3)\\n"
           + "...\" -> \"EnumerableAggregate\\n"
-          + "group = {0, 3}\\n"
+          + "group = {0}\\n"
           + "\" [label=\"0\"]\n"
           + "\"EnumerableTableScan\\n"
           + "table = [SALES, EMPS\\n]\\n"
           + "\" -> \"EnumerableCalc\\n"
           + "expr#0..1 = {inputs}\\n"
-          + "expr#2 = 10\\n"
-          + "expr#3 = 'SameName'\\n"
-          + "expr#4 = CAST($t1):I\\nNTEGER NOT NULL\\n"
+          + "expr#2 = CAST($t1):I\\n"
+          + "NTEGER NOT NULL\\n"
+          + "expr#3 = 10\\n"
+          + "expr#4 = =($t2, $t3)\\n"
           + "...\" [label=\"0\"]\n"
-          + "}\n"
-          + "\n";
+          + "}\n\n";
       extra = " as dot ";
       break;
     default:
@@ -3176,12 +3189,13 @@ public class JdbcTest {
         .enable(CalciteAssert.DB != CalciteAssert.DatabaseInstance.ORACLE)
         .explainContains(""
             + "EnumerableAggregate(group=[{0}], m0=[COUNT($1)])\n"
-            + "  EnumerableAggregate(group=[{1, 3}])\n"
-            + "    EnumerableHashJoin(condition=[=($0, $2)], joinType=[inner])\n"
-            + "      EnumerableCalc(expr#0..9=[{inputs}], expr#10=[CAST($t4):INTEGER], expr#11=[1997], expr#12=[=($t10, $t11)], time_id=[$t0], the_year=[$t4], $condition=[$t12])\n"
-            + "        EnumerableTableScan(table=[[foodmart2, time_by_day]])\n"
-            + "      EnumerableCalc(expr#0..7=[{inputs}], time_id=[$t1], unit_sales=[$t7])\n"
-            + "        EnumerableTableScan(table=[[foodmart2, sales_fact_1997]])")
+            + "  EnumerableCalc(expr#0=[{inputs}], expr#1=[1997:SMALLINT], expr#2=[CAST($t1):SMALLINT], c0=[$t2], unit_sales=[$t0])\n"
+            + "    EnumerableAggregate(group=[{1}])\n"
+            + "      EnumerableHashJoin(condition=[=($0, $2)], joinType=[semi])\n"
+            + "        EnumerableCalc(expr#0..7=[{inputs}], time_id=[$t1], unit_sales=[$t7])\n"
+            + "          EnumerableTableScan(table=[[foodmart2, sales_fact_1997]])\n"
+            + "        EnumerableCalc(expr#0..9=[{inputs}], expr#10=[CAST($t4):INTEGER], expr#11=[1997], expr#12=[=($t10, $t11)], time_id=[$t0], the_year=[$t4], $condition=[$t12])\n"
+            + "          EnumerableTableScan(table=[[foodmart2, time_by_day]])")
         .returns("c0=1997; m0=6\n");
   }
 
@@ -4123,7 +4137,7 @@ public class JdbcTest {
             "[deptno INTEGER NOT NULL, empid INTEGER NOT NULL, S REAL, FIVE INTEGER NOT NULL, M REAL, C BIGINT NOT NULL]")
         .explainContains(""
             + "EnumerableCalc(expr#0..7=[{inputs}], expr#8=[0:BIGINT], expr#9=[>($t4, $t8)], expr#10=[null:JavaType(class java.lang.Float)], expr#11=[CASE($t9, $t5, $t10)], expr#12=[5], deptno=[$t1], empid=[$t0], S=[$t11], FIVE=[$t12], M=[$t6], C=[$t7])\n"
-            + "  EnumerableWindow(window#0=[window(partition {1} order by [0] rows between $4 PRECEDING and CURRENT ROW aggs [COUNT($3), $SUM0($3), MIN($2), COUNT()])])\n"
+            + "  EnumerableWindow(window#0=[window(partition {1} order by [0] rows between $4 PRECEDING and CURRENT ROW aggs [COUNT($3), $SUM0($3), MIN($2), COUNT()])], constants=[[1]])\n"
             + "    EnumerableCalc(expr#0..4=[{inputs}], expr#5=[+($t3, $t0)], proj#0..1=[{exprs}], salary=[$t3], $3=[$t5])\n"
             + "      EnumerableTableScan(table=[[hr, emps]])\n")
         .returnsUnordered(
@@ -5017,7 +5031,7 @@ public class JdbcTest {
             + "group by grouping sets (deptno, deptno, deptno, (), ())\n"
             + "having group_id() > 0")
         .explainContains("EnumerableCalc(expr#0..2=[{inputs}], expr#3=[1], expr#4=[+($t1, $t3)], "
-            + "expr#5=[0], expr#6=[>($t1, $t5)], DEPTNO=[$t0], G=[$t4], C=[$t2], $condition=[$t6])\n"
+            + "expr#5=[0:BIGINT], expr#6=[>($t1, $t5)], DEPTNO=[$t0], G=[$t4], C=[$t2], $condition=[$t6])\n"
             + "  EnumerableUnion(all=[true])\n"
             + "    EnumerableCalc(expr#0..1=[{inputs}], expr#2=[0:BIGINT], DEPTNO=[$t0], $f1=[$t2], C=[$t1])\n"
             + "      EnumerableAggregate(group=[{7}], groups=[[{7}, {}]], C=[COUNT()])\n"
@@ -6931,7 +6945,13 @@ public class JdbcTest {
   @Test void testRowComparison() {
     CalciteAssert.that()
         .with(CalciteAssert.Config.JDBC_SCOTT)
-        .query("SELECT empno FROM JDBC_SCOTT.emp WHERE (ename, job) < ('Blake', 'Manager')")
+        // The extra casts are necessary because HSQLDB does not support a ROW type,
+        // and in the absence of these explicit casts the code generated contains
+        // a cast of a ROW value.  The correct way to fix this would be to improve
+        // the code generation for HSQLDB to expand suc casts into constructs
+        // supported by HSQLDB.
+        .query("SELECT empno FROM JDBC_SCOTT.emp WHERE (ename, job) < "
+            + "(CAST('Blake' AS VARCHAR(10)), CAST('Manager' AS VARCHAR(9)))")
         .returnsUnordered("EMPNO=7876", "EMPNO=7499", "EMPNO=7698");
   }
 
@@ -6974,7 +6994,53 @@ public class JdbcTest {
     with.query(
         "select * from \"employee\" where \"full_name\" = _UTF16'\u82f1\u56fd'")
         .throws_(
-            "Cannot apply = to the two different charsets ISO-8859-1 and UTF-16LE");
+            "Cannot apply operation '=' to strings with different charsets 'ISO-8859-1' and 'UTF-16LE'");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6146">[CALCITE-6146]
+   * Target charset should be used when comparing two strings through
+   * CONVERT/TRANSLATE function during validation</a>. */
+  @Test void testStringComparisonWithConvertFunc() {
+    CalciteAssert.AssertThat with = CalciteAssert.hr();
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where convert(\"name\" using GBK)=_GBK'Eric'")
+        .returns("name=Eric; empid=200\n");
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where _BIG5'Eric'=translate(\"name\" using BIG5)")
+        .returns("name=Eric; empid=200\n");
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where translate(null using UTF8) is null")
+        .returns("name=Bill; empid=100\n"
+                + "name=Eric; empid=200\n"
+                + "name=Sebastian; empid=150\n"
+                + "name=Theodore; empid=110\n");
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where _BIG5'Eric'=translate(\"name\" using LATIN1)")
+        .throws_("Cannot apply operation '=' to strings with "
+                + "different charsets 'Big5' and 'ISO-8859-1'");
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where convert(convert(\"name\" using GBK) using BIG5)=_BIG5'Eric'")
+        .returns("name=Eric; empid=200\n");
+
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where convert(\"name\", UTF8, GBK)=_GBK'Sebastian'")
+        .returns("name=Sebastian; empid=150\n");
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where _BIG5'Sebastian'=convert(\"name\", UTF8, BIG5)")
+        .returns("name=Sebastian; empid=150\n");
+
+    // check cast
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where cast(convert(\"name\" using LATIN1) as char(5))='Eric'")
+        .returns("name=Eric; empid=200\n");
+    // the result of convert(\"name\" using GBK) has GBK charset
+    // while CHAR(5) has ISO-8859-1 charset, which is not allowed to cast
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+          + "where cast(convert(\"name\" using GBK) as char(5))='Eric'")
+        .throws_(
+            "cannot convert value of type "
+            + "JavaType(class java.lang.String CHARACTER SET \"GBK\") to type CHAR(5) NOT NULL");
   }
 
   /** Tests metadata for the MySQL lexical scheme. */
@@ -7274,6 +7340,47 @@ public class JdbcTest {
     CalciteAssert.that(CalciteAssert.Config.REGULAR)
         .query("select nvl(\"commission\", -99) as c from \"hr\".\"emps\"")
         .throws_("No match found for function signature NVL(<NUMERIC>, <NUMERIC>)");
+  }
+
+  /** Test case for
+   * <a href="https://issues.apache.org/jira/browse/CALCITE-6730">[CALCITE-6730]
+   * Add CONVERT function(enabled in Oracle library)</a>. */
+  @Test void testConvertOracle() {
+    CalciteAssert.AssertThat withOracle10 =
+        CalciteAssert.hr()
+            .with(SqlConformanceEnum.ORACLE_10);
+    testConvertOracleInternal(withOracle10);
+
+    CalciteAssert.AssertThat withOracle12
+        = withOracle10.with(SqlConformanceEnum.ORACLE_12);
+    testConvertOracleInternal(withOracle12);
+  }
+
+  private void testConvertOracleInternal(CalciteAssert.AssertThat with) {
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+            + "where convert(\"name\", GBK)=_GBK'Eric'")
+        .returns("name=Eric; empid=200\n");
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+            + "where _BIG5'Eric'=convert(\"name\", LATIN1)")
+        .throws_("Cannot apply operation '=' to strings with "
+            + "different charsets 'Big5' and 'ISO-8859-1'");
+    // use LATIN1 as dest charset, not BIG5
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+            + "where _BIG5'Eric'=convert(\"name\", LATIN1, BIG5)")
+        .throws_("Cannot apply operation '=' to strings with "
+            + "different charsets 'Big5' and 'ISO-8859-1'");
+
+    // check cast
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+            + "where cast(convert(\"name\", LATIN1, UTF8) as varchar)='Eric'")
+        .returns("name=Eric; empid=200\n");
+    // the result of convert(\"name\", GBK) has GBK charset
+    // while CHAR(5) has ISO-8859-1 charset, which is not allowed to cast
+    with.query("select \"name\", \"empid\" from \"hr\".\"emps\"\n"
+            + "where cast(convert(\"name\", GBK) as varchar)='Eric'")
+        .throws_(
+            "cannot convert value of type "
+                + "JavaType(class java.lang.String CHARACTER SET \"GBK\") to type VARCHAR NOT NULL");
   }
 
   @Test void testIf() {

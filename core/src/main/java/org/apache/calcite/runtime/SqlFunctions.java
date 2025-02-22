@@ -38,6 +38,7 @@ import org.apache.calcite.linq4j.tree.Primitive;
 import org.apache.calcite.rel.type.TimeFrame;
 import org.apache.calcite.rel.type.TimeFrameSet;
 import org.apache.calcite.runtime.FlatLists.ComparableList;
+import org.apache.calcite.runtime.variant.VariantValue;
 import org.apache.calcite.sql.SqlIntervalQualifier;
 import org.apache.calcite.sql.SqlUtil;
 import org.apache.calcite.sql.fun.SqlLibraryOperators;
@@ -124,6 +125,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BinaryOperator;
 import java.util.function.Consumer;
@@ -131,6 +133,7 @@ import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
+import java.util.zip.CRC32;
 
 import static org.apache.calcite.config.CalciteSystemProperty.FUNCTION_LEVEL_CACHE_MAX_SIZE;
 import static org.apache.calcite.linq4j.Nullness.castNonNull;
@@ -276,12 +279,34 @@ public class SqlFunctions {
     return condition;
   }
 
-  /** SQL TO_BASE64(string) function. */
+  public static String uuidToString(UUID uuid) {
+    return uuid.toString();
+  }
+
+  public static UUID binaryToUuid(ByteString bytes) {
+    if (bytes.length() < 16) {
+      throw new IllegalArgumentException("Need at least 16 bytes for UUID");
+    }
+    ByteBuffer byteBuffer = ByteBuffer.wrap(bytes.getBytes());
+    long mostSignificantBits = byteBuffer.getLong();
+    long leastSignificantBits = byteBuffer.getLong();
+    return new UUID(mostSignificantBits, leastSignificantBits);
+  }
+
+  public static ByteString uuidToBinary(UUID uuid) {
+    byte[] dest = new byte[16];
+    ByteBuffer byteBuffer = ByteBuffer.wrap(dest);
+    byteBuffer.putLong(uuid.getMostSignificantBits());
+    byteBuffer.putLong(uuid.getLeastSignificantBits());
+    return new ByteString(dest);
+  }
+
+  /** SQL TO_BASE64(string)/BASE64(string) function. */
   public static String toBase64(String string) {
     return toBase64_(string.getBytes(UTF_8));
   }
 
-  /** SQL TO_BASE64(string) function for binary string. */
+  /** SQL TO_BASE64(string)/BASE64(string) function for binary string. */
   public static String toBase64(ByteString string) {
     return toBase64_(string.getBytes());
   }
@@ -296,7 +321,7 @@ public class SqlFunctions {
     return str.substring(0, str.length() - 1);
   }
 
-  /** SQL FROM_BASE64(string) function. */
+  /** SQL FROM_BASE64(string)/UNBASE64(string) function. */
   public static @Nullable ByteString fromBase64(String base64) {
     try {
       base64 = FROM_BASE64_REGEXP.matcher(base64).replaceAll("");
@@ -338,6 +363,46 @@ public class SqlFunctions {
   /** SQL TO_HEX(binary) function. */
   public static String toHex(ByteString byteString) {
     return Hex.encodeHexString(byteString.getBytes());
+  }
+
+  /** SQL HEX(varchar) function. */
+  public static String hex(String value) {
+    return Hex.encodeHexString(value.getBytes(UTF_8));
+  }
+
+  /** SQL BIN(long) function. */
+  public static String bin(long value) {
+    int zeros = Long.numberOfLeadingZeros(value);
+    if (zeros == Long.SIZE) {
+      return "0";
+    } else {
+      int length = Long.SIZE - zeros;
+      byte[] bytes = new byte[length];
+      for (int index = length - 1; index >= 0; index--) {
+        bytes[index] = (byte) ((value & 0x1) == 1 ? '1' : '0');
+        value >>>= 1;
+      }
+      //CHECKSTYLE: IGNORE 1
+      return new String(bytes, UTF_8);
+    }
+  }
+
+  /** SQL CRC32(string) function. */
+  public static long crc32(String value)  {
+    final CRC32 crc32 = new CRC32();
+    crc32.reset();
+    byte[] bytes = value.getBytes(UTF_8);
+    crc32.update(bytes, 0, bytes.length);
+    return crc32.getValue();
+  }
+
+  /** SQL CRC32(string) function for binary string. */
+  public static long crc32(ByteString value)  {
+    final CRC32 crc32 = new CRC32();
+    crc32.reset();
+    byte[] bytes = value.getBytes();
+    crc32.update(bytes, 0, bytes.length);
+    return crc32.getValue();
   }
 
   /** SQL MD5(string) function. */
@@ -913,6 +978,29 @@ public class SqlFunctions {
       i = j + delimiter.length();
     }
   }
+
+
+  /** SQL {@code SPLIT_PART(string, string, int)} function. */
+  public static String splitPart(String s, String delimiter, int n) {
+    if (Strings.isNullOrEmpty(s) || Strings.isNullOrEmpty(delimiter)) {
+      return "";
+    }
+
+    String[] parts = s.split(delimiter, -1);
+    int partCount = parts.length;
+
+    if (n < 0) {
+      n = partCount + n + 1;
+    }
+
+    if (n <= 0 || n > partCount) {
+      return "";
+    }
+
+    return parts[n - 1];
+  }
+
+
 
   /** SQL {@code SPLIT(string)} function. */
   public static List<String> split(String s) {
@@ -1657,6 +1745,29 @@ public class SqlFunctions {
     }
   }
 
+  /** Oracle's {@code CONVERT(charValue, destCharsetName[, srcCharsetName])} function,
+   * return null if s is null or empty. */
+  public static String convertOracle(String s, String... args) {
+    final Charset src;
+    final Charset dest;
+    if (args.length == 1) {
+      // srcCharsetName is not specified
+      src = Charset.defaultCharset();
+      dest = SqlUtil.getCharset(args[0]);
+    } else {
+      dest = SqlUtil.getCharset(args[0]);
+      src = SqlUtil.getCharset(args[1]);
+    }
+    byte[] bytes = s.getBytes(src);
+    final CharsetDecoder decoder = dest.newDecoder();
+    final ByteBuffer buffer = ByteBuffer.wrap(bytes);
+    try {
+      return decoder.decode(buffer).toString();
+    } catch (CharacterCodingException ex) {
+      throw RESOURCE.charsetEncoding(s, dest.name()).ex();
+    }
+  }
+
   /** State for {@code PARSE_URL}. */
   @Deterministic
   public static class ParseUrlFunction {
@@ -1748,7 +1859,7 @@ public class SqlFunctions {
   public static String trim(boolean left, boolean right, String seek,
       String s, boolean strict) {
     if (strict && seek.length() != 1) {
-      throw RESOURCE.trimError().ex();
+      throw RESOURCE.trimError(seek).ex();
     }
     int j = s.length();
     if (right) {
@@ -2378,6 +2489,40 @@ public class SqlFunctions {
     throw notArithmetic("+", b0, b1);
   }
 
+  // checked +
+
+  static byte intToByte(int value) {
+    if (value < Byte.MIN_VALUE || value > Byte.MAX_VALUE) {
+      throw new ArithmeticException(
+          "integer overflow: Value " + value + " does not fit in a TINYINT");
+    }
+    return (byte) value;
+  }
+
+  static short intToShort(int value) {
+    if (value < Short.MIN_VALUE || value > Short.MAX_VALUE) {
+      throw new ArithmeticException(
+          "integer overflow: Value " + value + " does not fit in a SMALLINT");
+    }
+    return (short) value;
+  }
+
+  public static byte checkedPlus(byte b0, byte b1) {
+    return intToByte(b0 + b1);
+  }
+
+  public static short checkedPlus(short b0, short b1) {
+    return intToShort(b0 + b1);
+  }
+
+  public static int checkedPlus(int b0, int b1) {
+    return Math.addExact(b0, b1);
+  }
+
+  public static long checkedPlus(long b0, long b1) {
+    return Math.addExact(b0, b1);
+  }
+
   // -
 
   /** SQL <code>-</code> operator applied to int values. */
@@ -2434,6 +2579,40 @@ public class SqlFunctions {
     }
 
     throw notArithmetic("-", b0, b1);
+  }
+
+  // checked -
+
+  public static byte checkedMinus(byte b0, byte b1) {
+    return intToByte(b0 - b1);
+  }
+
+  public static short checkedMinus(short b0, short b1) {
+    return intToShort(b0 - b1);
+  }
+
+  public static int checkedMinus(int b0, int b1) {
+    return Math.subtractExact(b0, b1);
+  }
+
+  public static long checkedMinus(long b0, long b1) {
+    return Math.subtractExact(b0, b1);
+  }
+
+  public static byte checkedUnaryMinus(byte b) {
+    return intToByte(-b);
+  }
+
+  public static short checkedUnaryMinus(short b) {
+    return intToShort(-b);
+  }
+
+  public static int checkedUnaryMinus(int b) {
+    return Math.subtractExact(0, b);
+  }
+
+  public static long checkedUnaryMinus(long b) {
+    return Math.subtractExact(0, b);
   }
 
   // /
@@ -2508,6 +2687,34 @@ public class SqlFunctions {
         .divide(b1, RoundingMode.HALF_DOWN).longValue();
   }
 
+  public static byte checkedDivide(byte b0, byte b1) {
+    return intToByte(b0 / b1);
+  }
+
+  public static short checkedDivide(short b0, short b1) {
+    return intToShort(b0 / b1);
+  }
+
+  public static int checkedDivide(int b0, int b1) {
+    // Implementation taken from Java 19
+    int q = b0 / b1;
+    if ((b0 & b1 & q) >= 0) {
+      return q;
+    } else {
+      throw new ArithmeticException("integer overflow");
+    }
+  }
+
+  public static long checkedDivide(long b0, long b1) {
+    // Implementation taken from Java 19
+    long q = b0 / b1;
+    if ((b0 & b1 & q) >= 0) {
+      return q;
+    } else {
+      throw new ArithmeticException("integer overflow");
+    }
+  }
+
   // *
 
   /** SQL <code>*</code> operator applied to int values. */
@@ -2566,6 +2773,24 @@ public class SqlFunctions {
     }
 
     throw notArithmetic("*", b0, b1);
+  }
+
+  // checked *
+
+  public static byte checkedMultiply(byte b0, byte b1) {
+    return intToByte(b0 * b1);
+  }
+
+  public static short checkedMultiply(short b0, short b1) {
+    return intToShort(b0 * b1);
+  }
+
+  public static int checkedMultiply(int b0, int b1) {
+    return Math.multiplyExact(b0, b1);
+  }
+
+  public static long checkedMultiply(long b0, long b1) {
+    return Math.multiplyExact(b0, b1);
   }
 
   /** SQL <code>SAFE_ADD</code> function applied to long values. */
@@ -2891,6 +3116,46 @@ public class SqlFunctions {
       bitsSet += Integer.bitCount(0xff & b.byteAt(i));
     }
     return bitsSet;
+  }
+
+  /** Helper function for implementing MySQL <code>BIT_COUNT</code>. Counts the number
+   * of bits set in a boolean value. */
+  public static long bitCountMySQL(Boolean b) {
+    return Long.bitCount(b ? 1L : 0L);
+  }
+
+  /** Helper function for implementing MySQL <code>BIT_COUNT</code>. Counts the number
+   * of bits set in a string value. */
+  public static long bitCountMySQL(String b) {
+    try {
+      return bitCount(new BigDecimal(b));
+    } catch (Exception ignore) {
+      return 0;
+    }
+  }
+
+  /** Helper function for implementing MySQL <code>BIT_COUNT</code>. Counts the number
+   * of bits set in a number value. */
+  public static long bitCountMySQL(Number b) {
+    return bitCount(new BigDecimal(b.toString()));
+  }
+
+  /** Helper function for implementing MySQL <code>BIT_COUNT</code>. Counts the number
+   * of bits set in a date value. */
+  public static long bitCountMySQL(java.sql.Date b) {
+    return bitCountMySQL(new SimpleDateFormat("yyyyMMdd", Locale.ENGLISH).format(b));
+  }
+
+  /** Helper function for implementing MySQL <code>BIT_COUNT</code>. Counts the number
+   * of bits set in a time value. */
+  public static long bitCountMySQL(Time b) {
+    return bitCountMySQL(new SimpleDateFormat("HHmmss", Locale.ENGLISH).format(b));
+  }
+
+  /** Helper function for implementing MySQL <code>BIT_COUNT</code>. Counts the number
+   * of bits set in a timestamp value. */
+  public static long bitCountMySQL(Timestamp b) {
+    return bitCountMySQL(new SimpleDateFormat("yyyyMMddHHmmss", Locale.ENGLISH).format(b));
   }
 
   /** Bitwise function <code>BIT_OR</code> applied to integer values. */
@@ -3781,12 +4046,18 @@ public class SqlFunctions {
   // Helpers
 
   /** Helper for implementing MIN. Somewhat similar to LEAST operator. */
-  public static <T extends Comparable<T>> T lesser(T b0, T b1) {
-    return b0 == null || b0.compareTo(b1) > 0 ? b1 : b0;
+  public static @Nullable <T extends Comparable<T>> T lesser(@Nullable T b0, @Nullable T b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return b0.compareTo(b1) > 0 ? b1 : b0;
   }
 
   /** LEAST operator. */
-  public static <T extends Comparable<T>> T least(T b0, T b1) {
+  public static @Nullable <T extends Comparable<T>> T least(@Nullable T b0, @Nullable T b1) {
     return b0 == null || b1 != null && b0.compareTo(b1) > 0 ? b1 : b0;
   }
 
@@ -3854,13 +4125,41 @@ public class SqlFunctions {
     return b0 > b1 ? b1 : b0;
   }
 
+  public static @Nullable <T extends Comparable<T>> List<T> lesser(
+      @Nullable List<T> b0, @Nullable List<T> b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return lt(b0, b1) ? b0 : b1;
+  }
+
+  public static @Nullable <T extends Comparable<T>> List<T> greater(
+      @Nullable List<T> b0, @Nullable List<T> b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return gt(b0, b1) ? b0 : b1;
+  }
+
   /** Helper for implementing MAX. Somewhat similar to GREATEST operator. */
-  public static <T extends Comparable<T>> T greater(T b0, T b1) {
-    return b0 == null || b0.compareTo(b1) < 0 ? b1 : b0;
+  public static @Nullable <T extends Comparable<T>> T greater(@Nullable T b0, @Nullable T b1) {
+    if (b0 == null) {
+      return b1;
+    }
+    if (b1 == null) {
+      return b0;
+    }
+    return b0.compareTo(b1) < 0 ? b1 : b0;
   }
 
   /** GREATEST operator. */
-  public static <T extends Comparable<T>> T greatest(T b0, T b1) {
+  public static @Nullable <T extends Comparable<T>> T greatest(@Nullable T b0, @Nullable T b1) {
     return b0 == null || b1 != null && b0.compareTo(b1) < 0 ? b1 : b0;
   }
 
@@ -4059,6 +4358,10 @@ public class SqlFunctions {
     return v == null ? castNonNull(null) : toInt(v);
   }
 
+  // Method tagged as non-deterministic because it can throw.
+  // The DeterministicCodeOptimizer may otherwise try to lift it out of try-catch blocks.
+  // See https://issues.apache.org/jira/browse/CALCITE-6753
+  @NonDeterministic
   public static int toInt(String s) {
     return parseInt(s.trim());
   }
@@ -5364,6 +5667,30 @@ public class SqlFunctions {
     return timestampToTime(localTimestamp(root));
   }
 
+  /** SQL {@code SYSTIMESTAMP} function. */
+  @NonDeterministic
+  public static long sysTimestamp(DataContext root) {
+    return DataContext.Variable.SYS_TIMESTAMP.get(root);
+  }
+
+  /** SQL {@code SYSDATE} function.
+   *
+   * <p> When the date is before 1970-01-01 00:00:00, for example: 1969-12-31 23:59:59,
+   * the timestamp will return a negative value, such as -1000. The date(days since epoch)
+   * returned by timestampToDate(-1000) is 0, so we need to additionally judge the result
+   * of timestampToTime(-1000). If its value is less than 0, we need to reduce date by 1
+   * to ensure the accuracy of date. */
+  @NonDeterministic
+  public static int sysDate(DataContext root) {
+    final long timestamp = sysTimestamp(root);
+    int date = timestampToDate(timestamp);
+    final int time = timestampToTime(timestamp);
+    if (time < 0) {
+      --date;
+    }
+    return date;
+  }
+
   @NonDeterministic
   public static TimeZone timeZone(DataContext root) {
     return DataContext.Variable.TIME_ZONE.get(root);
@@ -5495,8 +5822,16 @@ public class SqlFunctions {
   }
 
   /** SQL {@code REPLACE(string, search, replacement)} function. */
-  public static String replace(String s, String search, String replacement) {
-    return s.replace(search, replacement);
+  public static String replace(String s, String search, String replacement,
+      boolean isCaseSensitive) {
+    if (search.isEmpty()) {
+      return s;
+    }
+    if (isCaseSensitive) {
+      return s.replace(search, replacement);
+    }
+    // for MSSQL's REPLACE function, search pattern is case-insensitive during matching
+    return org.apache.commons.lang3.StringUtils.replaceIgnoreCase(s, search, replacement);
   }
 
   /** Helper for "array element reference". Caller has already ensured that
@@ -5531,6 +5866,9 @@ public class SqlFunctions {
    * known until runtime.
    */
   public static @Nullable Object item(Object object, Object index) {
+    if (object instanceof VariantValue) {
+      return ((VariantValue) object).item(index);
+    }
     if (object instanceof Map) {
       return mapItem((Map) object, index);
     }
@@ -6184,6 +6522,15 @@ public class SqlFunctions {
   public static List reverse(List list) {
     Collections.reverse(list);
     return list;
+  }
+
+  /** SQL {@code ARRAY_SLICE(array, start, length)} function. */
+  public static List arraySlice(List list, int start, int length) {
+    // return empty list if start/length are out of range of the array
+    if (start + length > list.size()) {
+      return Collections.emptyList();
+    }
+    return list.subList(start, start + length);
   }
 
   /** SQL {@code ARRAY_TO_STRING(array, delimiter)} function. */

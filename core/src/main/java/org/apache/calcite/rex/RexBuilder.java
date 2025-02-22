@@ -39,6 +39,7 @@ import org.apache.calcite.sql.fun.SqlLibraryOperators;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.type.ArraySqlType;
+import org.apache.calcite.sql.type.IntervalSqlType;
 import org.apache.calcite.sql.type.MapSqlType;
 import org.apache.calcite.sql.type.MultisetSqlType;
 import org.apache.calcite.sql.type.SqlTypeFamily;
@@ -75,6 +76,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.function.IntPredicate;
 import java.util.stream.Collectors;
 
@@ -195,6 +197,10 @@ public class RexBuilder {
   public RexNode makeFieldAccess(RexNode expr, String fieldName,
       boolean caseSensitive) {
     final RelDataType type = expr.getType();
+    if (type.getSqlTypeName() == SqlTypeName.VARIANT) {
+      // VARIANT.field is rewritten as an VARIANT[field]
+      return this.makeCall(SqlStdOperatorTable.ITEM, expr, this.makeLiteral(fieldName));
+    }
     final RelDataTypeField field =
         type.getField(fieldName, caseSensitive, false);
     if (field == null) {
@@ -234,11 +240,12 @@ public class RexBuilder {
   private RexNode makeFieldAccessInternal(
       RexNode expr,
       final RelDataTypeField field) {
+    RelDataType fieldType = field.getType();
     if (expr instanceof RexRangeRef) {
       RexRangeRef range = (RexRangeRef) expr;
       if (field.getIndex() < 0) {
         return makeCall(
-            field.getType(),
+            fieldType,
             GET_OPERATOR,
             ImmutableList.of(
                 expr,
@@ -246,9 +253,13 @@ public class RexBuilder {
       }
       return new RexInputRef(
           range.getOffset() + field.getIndex(),
-          field.getType());
+          fieldType);
     }
-    return new RexFieldAccess(expr, field);
+
+    if (expr.getType().isNullable()) {
+      fieldType = typeFactory.enforceTypeWithNullability(fieldType, true);
+    }
+    return new RexFieldAccess(expr, field, fieldType);
   }
 
   /**
@@ -854,7 +865,9 @@ public class RexBuilder {
       return true;
     }
     final SqlTypeName sqlType = toType.getSqlTypeName();
-    if (sqlType == SqlTypeName.MEASURE) {
+    if (sqlType == SqlTypeName.MEASURE
+        || sqlType == SqlTypeName.VARIANT
+        || sqlType == SqlTypeName.UUID) {
       return false;
     }
     if (!RexLiteral.valueMatchesType(value, sqlType, false)) {
@@ -1336,8 +1349,15 @@ public class RexBuilder {
       o = ((TimestampWithTimeZoneString) o).round(p);
       break;
     case DECIMAL:
-      if (o != null && type.getScale() != RelDataType.SCALE_NOT_SPECIFIED) {
-        assert o instanceof BigDecimal;
+      if (o == null) {
+        break;
+      }
+      assert o instanceof BigDecimal;
+      if (type instanceof IntervalSqlType) {
+        SqlIntervalQualifier qualifier = ((IntervalSqlType) type).getIntervalQualifier();
+        o = ((BigDecimal) o).multiply(qualifier.getUnit().multiplier);
+        typeName = type.getSqlTypeName();
+      } else if (type.getScale() != RelDataType.SCALE_NOT_SPECIFIED) {
         o = ((BigDecimal) o).setScale(type.getScale(), typeFactory.getTypeSystem().roundingMode());
         if (type.getScale() < 0) {
           o = new BigDecimal(((BigDecimal) o).toPlainString());
@@ -1360,6 +1380,10 @@ public class RexBuilder {
    */
   public RexLiteral makeLiteral(boolean b) {
     return b ? booleanTrue : booleanFalse;
+  }
+
+  public RexLiteral makeUuidLiteral(@Nullable UUID uuid) {
+    return new RexLiteral(uuid, typeFactory.createSqlType(SqlTypeName.UUID), SqlTypeName.UUID);
   }
 
   /**
@@ -2001,7 +2025,7 @@ public class RexBuilder {
     case CHAR:
       final NlsString nlsString = (NlsString) value;
       if (trim) {
-        return makeCharLiteral(nlsString.rtrim());
+        return makeCharLiteral(nlsString.rtrim(type.getPrecision()));
       } else {
         return makeCharLiteral(padRight(nlsString, type.getPrecision()));
       }

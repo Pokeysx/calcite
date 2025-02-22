@@ -147,6 +147,9 @@ public enum SqlKind {
   /** {@code CONVERT} function. */
   CONVERT,
 
+  /** Oracle's {@code CONVERT} function. */
+  CONVERT_ORACLE,
+
   /** {@code TRANSLATE} function. */
   TRANSLATE,
 
@@ -308,6 +311,31 @@ public enum SqlKind {
   MINUS,
 
   /**
+   * Checked version of PLUS, which produces a runtime error on overflow.
+   * Not used for date/time arithmetic.
+   */
+  CHECKED_PLUS,
+
+  /**
+   * Checked version of MINUS, which produces a runtime error on overflow.
+   * Not used for date/time arithmetic.
+   */
+  CHECKED_MINUS,
+
+  /**
+   * Checked version of TIMES, which produces a runtime error on overflow.
+   * Not used for date/time arithmetic.
+   */
+  CHECKED_TIMES,
+
+  /**
+   * Checked version of DIVIDE, which produces a runtime error on overflow.
+   * For example, INT_MIN / -1.
+   * Not used for date/time arithmetic.
+   */
+  CHECKED_DIVIDE,
+
+  /**
    * Alternation operator in a pattern expression within a
    * {@code MATCH_RECOGNIZE} clause.
    */
@@ -450,10 +478,10 @@ public enum SqlKind {
   /** {@code NVL2} function (Oracle, Spark). */
   NVL2,
 
-  /** {@code GREATEST} function (Oracle, Spark). */
+  /** {@code GREATEST} function (Oracle). */
   GREATEST,
 
-  /** {@code GREATEST} function (PostgreSQL). */
+  /** {@code GREATEST} function (PostgreSQL, Spark). */
   GREATEST_PG,
 
   /** The two-argument {@code CONCAT} function (Oracle). */
@@ -478,7 +506,7 @@ public enum SqlKind {
   /** {@code LEAST} function (Oracle). */
   LEAST,
 
-  /** {@code LEAST} function (PostgreSQL). */
+  /** {@code LEAST} function (PostgreSQL, Spark). */
   LEAST_PG,
 
   /** {@code LOG} function. (Mysql, Spark). */
@@ -529,6 +557,11 @@ public enum SqlKind {
    * @see #MINUS
    */
   MINUS_PREFIX,
+
+  /**
+   * Checked version of unary minus operator.
+   */
+  CHECKED_MINUS_PREFIX,
 
   /** {@code EXISTS} operator. */
   EXISTS,
@@ -796,6 +829,9 @@ public enum SqlKind {
 
   /** {@code ARRAY_SIZE} function (Spark semantics). */
   ARRAY_SIZE,
+
+  /** {@code ARRAY_SLICE} function (Hive semantics). */
+  ARRAY_SLICE,
 
   /** {@code ARRAY_TO_STRING} function (BigQuery semantics). */
   ARRAY_TO_STRING,
@@ -1425,8 +1461,8 @@ public enum SqlKind {
   public static final Set<SqlKind> EXPRESSION =
       EnumSet.complementOf(
           concat(
-              EnumSet.of(AS, ARGUMENT_ASSIGNMENT, CONVERT, TRANSLATE, DEFAULT,
-                  RUNNING, FINAL, LAST, FIRST, PREV, NEXT,
+              EnumSet.of(AS, ARGUMENT_ASSIGNMENT, CONVERT, CONVERT_ORACLE, TRANSLATE,
+                  DEFAULT, RUNNING, FINAL, LAST, FIRST, PREV, NEXT,
                   FILTER, WITHIN_GROUP, IGNORE_NULLS, RESPECT_NULLS, SEPARATOR,
                   DESCENDING, CUBE, ROLLUP, GROUPING_SETS, EXTEND, LATERAL,
                   SELECT, JOIN, OTHER_FUNCTION, POSITION, CAST, TRIM, FLOOR, CEIL,
@@ -1516,10 +1552,16 @@ public enum SqlKind {
    * {@link #MINUS}
    * {@link #TIMES}
    * {@link #DIVIDE}
-   * {@link #MOD}.
+   * {@link #MOD}
+   * and the corresponding checked arithmetic operations.
    */
   public static final Set<SqlKind> BINARY_ARITHMETIC =
-      EnumSet.of(PLUS, MINUS, TIMES, DIVIDE, MOD);
+      EnumSet.of(PLUS, MINUS, TIMES, DIVIDE, MOD,
+          CHECKED_PLUS, CHECKED_MINUS, CHECKED_TIMES, CHECKED_DIVIDE);
+
+  public static final Set<SqlKind> CHECKED_ARITHMETIC =
+      EnumSet.of(CHECKED_PLUS, CHECKED_MINUS, CHECKED_TIMES, CHECKED_DIVIDE, CHECKED_MINUS_PREFIX);
+
 
   /**
    * Category of binary equality.
@@ -1574,7 +1616,7 @@ public enum SqlKind {
    */
   @API(since = "1.22", status = API.Status.EXPERIMENTAL)
   public static final Set<SqlKind> SYMMETRICAL_SAME_ARG_TYPE =
-      EnumSet.of(PLUS, TIMES);
+      EnumSet.of(PLUS, TIMES, CHECKED_PLUS, CHECKED_TIMES);
 
   /**
    * Simple binary operators are those operators which expects operands from the same Domain.
@@ -1785,6 +1827,7 @@ public enum SqlKind {
     case ARRAY_REPEAT:
     case ARRAY_REVERSE:
     case ARRAY_SIZE:
+    case ARRAY_SLICE:
     case ARRAY_TO_STRING:
     case ARRAY_UNION:
     case ARRAYS_OVERLAP:

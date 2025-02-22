@@ -127,10 +127,12 @@ import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Sets;
 
 import org.apiguardian.api.API;
+import org.checkerframework.checker.initialization.qual.UnknownInitialization;
 import org.checkerframework.checker.nullness.qual.KeyFor;
 import org.checkerframework.checker.nullness.qual.NonNull;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.checkerframework.checker.nullness.qual.PolyNull;
+import org.checkerframework.checker.nullness.qual.RequiresNonNull;
 import org.checkerframework.dataflow.qual.Pure;
 import org.slf4j.Logger;
 
@@ -160,7 +162,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
+import java.util.stream.Stream;
 
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
@@ -1209,16 +1211,28 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
       RelDataType type = namespace.getType();
 
       if (node == top) {
-        // A top-level namespace must not return any must-filter fields.
+        final FilterRequirement filterRequirement =
+            namespace.getFilterRequirement();
+
+        // Either of the following two conditions result in an invalid query:
+        // 1) A top-level namespace must not return any must-filter fields.
         // A non-top-level namespace (e.g. a subquery) may return must-filter
         // fields; these are neutralized if the consuming query filters on them.
-        final ImmutableBitSet mustFilterFields =
-            namespace.getMustFilterFields();
-        if (!mustFilterFields.isEmpty()) {
+        // 2) A top-level namespace must not have any remnant-must-filter fields.
+        // Remnant must filter fields are fields that are not selected and cannot
+        // be defused unless a bypass field defuses it.
+        if (!filterRequirement.filterFields.isEmpty()
+            || !filterRequirement.remnantFilterFields.isEmpty()) {
+          Stream<String> mustFilterStream =
+              filterRequirement.filterFields.stream()
+                  .mapToObj(namespace.getRowType().getFieldNames()::get);
+          Stream<String> remnantStream =
+              filterRequirement.remnantFilterFields.stream()
+                  .map(q -> q.suffix().get(0));
+
           // Set of field names, sorted alphabetically for determinism.
           Set<String> fieldNameSet =
-              StreamSupport.stream(mustFilterFields.spliterator(), false)
-                  .map(namespace.getRowType().getFieldNames()::get)
+              Stream.concat(mustFilterStream, remnantStream)
                   .collect(Collectors.toCollection(TreeSet::new));
           throw newValidationError(node,
               RESOURCE.mustFilterFieldsMissing(fieldNameSet.toString()));
@@ -1957,18 +1971,26 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
   }
 
   @Override public @Nullable SqlCall makeNullaryCall(SqlIdentifier id) {
-    if (id.names.size() == 1 && !id.isComponentQuoted(0)) {
+    if (!id.isComponentQuoted(id.names.size() - 1)) {
       final List<SqlOperator> list = new ArrayList<>();
       opTab.lookupOperatorOverloads(id, null, SqlSyntax.FUNCTION, list,
           catalogReader.nameMatcher());
       for (SqlOperator operator : list) {
-        if (operator.getSyntax() == SqlSyntax.FUNCTION_ID) {
+        if (operator.getSyntax() == SqlSyntax.FUNCTION_ID
+            || operator.getSyntax() == SqlSyntax.FUNCTION_ID_CONSTANT) {
           // Even though this looks like an identifier, it is a
           // actually a call to a function. Construct a fake
           // call to this function, so we can use the regular
           // operator validation.
-          return new SqlBasicCall(operator, ImmutableList.of(),
-              id.getParserPosition(), null).withExpanded(true);
+          SqlCall sqlCall =
+               new SqlBasicCall(operator, ImmutableList.of(), id.getParserPosition(), null)
+                   .withExpanded(true);
+          if (operator.getSyntax() == SqlSyntax.FUNCTION_ID_CONSTANT
+              && !this.config.conformance().allowNiladicConstantWithoutParentheses()) {
+            throw handleUnresolvedFunction(sqlCall, operator,
+                ImmutableList.of(), null);
+          }
+          return sqlCall;
         }
       }
     }
@@ -2070,7 +2092,8 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
     if (overloads.size() == 1) {
       SqlFunction fun = (SqlFunction) overloads.get(0);
       if ((fun.getSqlIdentifier() == null)
-          && (fun.getSyntax() != SqlSyntax.FUNCTION_ID)) {
+          && (fun.getSyntax() != SqlSyntax.FUNCTION_ID
+          && fun.getSyntax() != SqlSyntax.FUNCTION_ID_CONSTANT)) {
         final int expectedArgCount =
             fun.getOperandCountRange().getMin();
         throw newValidationError(call,
@@ -3855,6 +3878,13 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
         boolean rightFound = false;
         // The two sides of the comparison must be from different tables
         for (SqlNode operand : call.getOperandList()) {
+          if (operand instanceof SqlBasicCall) {
+            SqlBasicCall basicCall = (SqlBasicCall) operand;
+            if (basicCall.getKind() == SqlKind.CAST) {
+              // Allow casts applied to identifiers
+              operand = basicCall.operand(0);
+            }
+          }
           if (!(operand instanceof SqlIdentifier)) {
             throw newValidationError(call, this.exception);
           }
@@ -3889,11 +3919,11 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
 
   /**
    * Shuttle which determines whether an expression is a simple conjunction
-   * of equalities. */
+   * of equalities. Each equality may involve a cast */
   private static class ConjunctionOfEqualities extends SqlShuttle {
     boolean illegal = false;
 
-    // Check an AND node.  Children can be AND nodes or EQUAL nodes.
+    // Check an AND node. Children can be AND nodes or EQUAL nodes.
     void checkAnd(SqlCall call) {
       // This doesn't seem to use the visitor pattern,
       // because we recurse explicitly on the tree structure.
@@ -3911,13 +3941,22 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
       }
     }
 
-    @Override public @Nullable SqlNode visit(final org.apache.calcite.sql.SqlCall call) {
+    @Override public @Nullable SqlNode visit(final SqlCall call) {
       SqlKind kind = call.getKind();
-      if (kind != SqlKind.AND && kind != SqlKind.EQUALS) {
+      if (kind != SqlKind.AND && kind != SqlKind.EQUALS && kind != SqlKind.CAST) {
         illegal = true;
+        return null;
       }
       if (kind == SqlKind.AND) {
         this.checkAnd(call);
+      }
+      if (kind == SqlKind.CAST) {
+        // Cast must be applied directly to a column
+        SqlNode operand = call.operand(0);
+        if (! (operand instanceof SqlIdentifier)) {
+          illegal = true;
+          return null;
+        }
       }
       return super.visit(call);
     }
@@ -4084,7 +4123,6 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
 
     validateWhereClause(select);
     validateGroupClause(select);
-    validateHavingClause(select);
     validateWindowClause(select);
     validateQualifyClause(select);
     handleOffsetFetch(select.getOffset(), select.getFetch());
@@ -4095,65 +4133,9 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
     final RelDataType rowType =
         validateSelectList(selectItems, select, targetRowType);
     ns.setType(rowType);
+    validateHavingClause(select);
 
-    // Deduce which columns must be filtered.
-    ns.mustFilterFields = ImmutableBitSet.of();
-    if (from != null) {
-      final Set<SqlQualified> qualifieds = new LinkedHashSet<>();
-      for (ScopeChild child : fromScope.children) {
-        final List<String> fieldNames =
-            child.namespace.getRowType().getFieldNames();
-        child.namespace.getMustFilterFields()
-            .forEachInt(i ->
-                qualifieds.add(
-                    SqlQualified.create(fromScope, 1, child.namespace,
-                        new SqlIdentifier(
-                            ImmutableList.of(child.name, fieldNames.get(i)),
-                            SqlParserPos.ZERO))));
-      }
-      if (!qualifieds.isEmpty()) {
-        if (select.getWhere() != null) {
-          forEachQualified(select.getWhere(), getWhereScope(select),
-              qualifieds::remove);
-        }
-        if (select.getHaving() != null) {
-          forEachQualified(select.getHaving(), getHavingScope(select),
-              qualifieds::remove);
-        }
-
-        // Each of the must-filter fields identified must be returned as a
-        // SELECT item, which is then flagged as must-filter.
-        final BitSet mustFilterFields = new BitSet();
-        final List<SqlNode> expandedSelectItems =
-            requireNonNull(fromScope.getExpandedSelectList(),
-                "expandedSelectList");
-        forEach(expandedSelectItems, (selectItem, i) -> {
-          selectItem = stripAs(selectItem);
-          if (selectItem instanceof SqlIdentifier) {
-            SqlQualified qualified =
-                fromScope.fullyQualify((SqlIdentifier) selectItem);
-            if (qualifieds.remove(qualified)) {
-              // SELECT item #i referenced a must-filter column that was not
-              // filtered in the WHERE or HAVING. It becomes a must-filter
-              // column for our consumer.
-              mustFilterFields.set(i);
-            }
-          }
-        });
-
-        // If there are must-filter fields that are not in the SELECT clause,
-        // this is an error.
-        if (!qualifieds.isEmpty()) {
-          throw newValidationError(select,
-              RESOURCE.mustFilterFieldsMissing(
-                  qualifieds.stream()
-                      .map(q -> q.suffix().get(0))
-                      .collect(Collectors.toCollection(TreeSet::new))
-                      .toString()));
-        }
-        ns.mustFilterFields = ImmutableBitSet.fromBitSet(mustFilterFields);
-      }
-    }
+    validateMustFilterRequirements(select, ns);
 
     // Validate ORDER BY after we have set ns.rowType because in some
     // dialects you can refer to columns of the select list, e.g.
@@ -4170,8 +4152,10 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
     }
   }
 
-  /** For each identifier in an expression, resolves it to a qualified name
-   * and calls the provided action. */
+  /**
+   * For each identifier in an expression, resolves it to a qualified name
+   * and calls the provided action.
+   */
   private static void forEachQualified(SqlNode node, SqlValidatorScope scope,
       Consumer<SqlQualified> consumer) {
     node.accept(new SqlBasicVisitor<Void>() {
@@ -4181,6 +4165,48 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
         return null;
       }
     });
+  }
+
+  /** Removes all entries from {@code qualifieds} and
+   * {@code remnantMustFilterFields} if {@code node} is a bypassField. */
+  private static void purgeForBypassFields(SqlNode node, SqlValidatorScope scope,
+      Set<SqlQualified> qualifieds, Set<SqlQualified> bypassQualifieds,
+      Set<SqlQualified> remnantMustFilterFields) {
+    node.accept(new SqlBasicVisitor<Void>() {
+      @Override public Void visit(SqlIdentifier id) {
+        final SqlQualified qualified = scope.fullyQualify(id);
+        if (bypassQualifieds.contains(qualified)) {
+          // Clear all the must-filter qualifieds from the same table identifier
+          Collection<SqlQualified> sameIdentifier =
+              qualifieds.stream()
+                  .filter(q -> qualifiedMatchesIdentifier(q, qualified))
+                  .collect(Collectors.toList());
+          sameIdentifier.forEach(qualifieds::remove);
+
+          // Clear all the remnant must-filter qualifieds from the same table identifier
+          Collection<SqlQualified> sameIdentifier_ =
+              remnantMustFilterFields.stream()
+                  .filter(q -> qualifiedMatchesIdentifier(q, qualified))
+                  .collect(Collectors.toList());
+          sameIdentifier_.forEach(remnantMustFilterFields::remove);
+        }
+        return null;
+      }
+    });
+  }
+
+  private static void toQualifieds(ImmutableBitSet fields,
+      Set<SqlQualified> qualifiedSet, SelectScope fromScope, ScopeChild child,
+      List<String> fieldNames) {
+    fields.forEachInt(i ->
+        qualifiedSet.add(
+            SqlQualified.create(fromScope, 1, child.namespace,
+                new SqlIdentifier(ImmutableList.of(child.name, fieldNames.get(i)),
+                    SqlParserPos.ZERO))));
+  }
+
+  private static boolean qualifiedMatchesIdentifier(SqlQualified q1, SqlQualified q2) {
+    return q1.identifier.names.get(0).equals(q2.identifier.names.get(0));
   }
 
   private void checkRollUpInSelectList(SqlSelect select) {
@@ -4260,8 +4286,10 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
         // can be another SqlCall, or an SqlIdentifier.
         checkRollUp(grandParent, parent, stripDot, scope, contextClause);
       } else if (stripDot.getKind() == SqlKind.CONVERT
-          || stripDot.getKind() == SqlKind.TRANSLATE) {
-        // only need to check operand[0] for CONVERT or TRANSLATE
+          || stripDot.getKind() == SqlKind.TRANSLATE
+          || stripDot.getKind() == SqlKind.CONVERT_ORACLE) {
+        // only need to check operand[0] for
+        // CONVERT, TRANSLATE or CONVERT_ORACLE
         SqlNode child = ((SqlCall) stripDot).getOperandList().get(0);
         checkRollUp(parent, current, child, scope, contextClause);
       } else if (stripDot.getKind() == SqlKind.LAMBDA) {
@@ -4403,6 +4431,15 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
       default:
         break;
       }
+    } else if (query.getKind() == SqlKind.WITH) {
+     // The modality of WITH clause depends on its body
+     // For example:
+     // SQL: WITH STREAMTABLE AS (SELECT STREAM * FROM KAFKA.MOCKTABLE) SELECT * FROM STREAMTABLE
+     // The modality should be RELATION.
+     // SQL: WITH STREAMTABLE AS (SELECT STREAM * FROM KAFKA.MOCKTABLE)
+     //      SELECT STREAM * FROM STREAMTABLE
+     // The modality should be STREAM.
+      validateModality(((SqlWith) query).body);
     } else {
       assert query.isA(SqlKind.SET_QUERY);
       final SqlCall call = (SqlCall) query;
@@ -4425,6 +4462,8 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
           : SqlModality.RELATION;
     } else if (query.getKind() == SqlKind.VALUES) {
       return SqlModality.RELATION;
+    } else if (query.getKind() == SqlKind.WITH) {
+      return deduceModality(((SqlWith) query).body);
     } else {
       assert query.isA(SqlKind.SET_QUERY);
       final SqlCall call = (SqlCall) query;
@@ -4633,6 +4672,92 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
     if (!qualifyContainsWindowFunction) {
       throw newValidationError(qualifyNode,
           RESOURCE.qualifyExpressionMustContainWindowFunction(qualifyNode.toString()));
+    }
+  }
+
+  protected void validateMustFilterRequirements(SqlSelect select, SelectNamespace ns) {
+    ns.filterRequirement = FilterRequirement.EMPTY;
+    if (select.getFrom() != null) {
+      final SelectScope fromScope = (SelectScope) getFromScope(select);
+      final BitSet projectedNonFilteredBypassField = new BitSet();
+      final Set<SqlQualified> qualifieds = new LinkedHashSet<>();
+      final Set<SqlQualified> bypassQualifieds = new LinkedHashSet<>();
+      final Set<SqlQualified> remnantQualifieds = new LinkedHashSet<>();
+      for (ScopeChild child : fromScope.children) {
+        final List<String> fieldNames =
+            child.namespace.getRowType().getFieldNames();
+        final FilterRequirement filterRequirement =
+            child.namespace.getFilterRequirement();
+        toQualifieds(filterRequirement.filterFields, qualifieds, fromScope,
+            child, fieldNames);
+        toQualifieds(filterRequirement.bypassFields, bypassQualifieds,
+            fromScope, child, fieldNames);
+        remnantQualifieds.addAll(filterRequirement.remnantFilterFields);
+      }
+      if (!qualifieds.isEmpty() || !bypassQualifieds.isEmpty()) {
+        if (select.getWhere() != null) {
+          forEachQualified(select.getWhere(), getWhereScope(select),
+              qualifieds::remove);
+          purgeForBypassFields(select.getWhere(), getWhereScope(select),
+              qualifieds, bypassQualifieds, remnantQualifieds);
+        }
+        if (select.getHaving() != null) {
+          forEachQualified(select.getHaving(), getHavingScope(select),
+              qualifieds::remove);
+          purgeForBypassFields(select.getHaving(), getHavingScope(select),
+              qualifieds, bypassQualifieds, remnantQualifieds);
+        }
+
+        // Each of the must-filter fields identified must be returned as a
+        // SELECT item, which is then flagged as must-filter.
+        final BitSet mustFilterFields = new BitSet();
+        // Each of the bypass fields identified must be returned as a
+        // SELECT item, which is then flagged as a bypass field for the consumer.
+        final BitSet mustFilterBypassFields = new BitSet();
+        final List<SqlNode> expandedSelectItems =
+            requireNonNull(fromScope.getExpandedSelectList(),
+                "expandedSelectList");
+        forEach(expandedSelectItems, (selectItem, i) -> {
+          selectItem = stripAs(selectItem);
+          if (selectItem instanceof SqlIdentifier) {
+            SqlQualified qualified =
+                fromScope.fullyQualify((SqlIdentifier) selectItem);
+            if (qualifieds.remove(qualified)) {
+              // SELECT item #i referenced a must-filter column that was not
+              // filtered in the WHERE or HAVING. It becomes a must-filter
+              // column for our consumer.
+              mustFilterFields.set(i);
+            }
+            if (bypassQualifieds.remove(qualified)) {
+              // SELECT item #i referenced a bypass column that was not filtered
+              // in the WHERE or HAVING. It becomes a bypass column for our
+              // consumer.
+              mustFilterBypassFields.set(i);
+              projectedNonFilteredBypassField.set(0);
+            }
+          }
+        });
+
+        // If there are must-filter fields that are not in the SELECT clause and
+        // there were no bypass-fields on this table, this is an error.
+        if (!qualifieds.isEmpty() && !projectedNonFilteredBypassField.get(0)) {
+          throw newValidationError(select,
+              RESOURCE.mustFilterFieldsMissing(
+                  qualifieds.stream()
+                      .map(q -> q.suffix().get(0))
+                      .collect(Collectors.toCollection(TreeSet::new))
+                      .toString()));
+        }
+        // Remaining must-filter fields can be defused by a bypass-field,
+        // so we pass this to the consumer.
+        ImmutableSet<SqlQualified> remnantMustFilterFields =
+            Stream.of(remnantQualifieds, qualifieds)
+                .flatMap(Set::stream).collect(ImmutableSet.toImmutableSet());
+        ns.filterRequirement =
+            new FilterRequirement(ImmutableBitSet.fromBitSet(mustFilterFields),
+                ImmutableBitSet.fromBitSet(mustFilterBypassFields),
+                remnantMustFilterFields);
+      }
     }
   }
 
@@ -4979,8 +5104,8 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
     if (SqlUtil.containsCall(having, call -> call.getOperator() instanceof SqlOverOperator)) {
       throw newValidationError(originalHaving, RESOURCE.windowInHavingNotAllowed());
     }
-    havingScope.checkAggregateExpr(having, true);
     inferUnknownTypes(booleanType, havingScope, having);
+    havingScope.checkAggregateExpr(having, true);
     having.validate(this, havingScope);
     final RelDataType type = deriveType(havingScope, having);
     if (!SqlTypeUtil.inBooleanFamily(type)) {
@@ -7052,7 +7177,15 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
           throw newValidationError(id.getComponent(i),
               RESOURCE.unknownField(name));
         }
+        boolean recordIsNullable = type.isNullable();
         type = field.getType();
+        if (recordIsNullable) {
+          // If parent record is nullable, field must also be nullable.
+          // Consider CREATE TABLE T(p ROW(k VARCHAR) NULL);
+          // Since T.p is nullable, T.p.k also has to be nullable, even if
+          // the type of k itself is not nullable.
+          type = getTypeFactory().enforceTypeWithNullability(type, true);
+        }
       }
       type =
           SqlTypeUtil.addCharsetAndCollation(
@@ -7286,6 +7419,8 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
     final SqlSelect select;
     final SqlNode root;
     final Clause clause;
+    // Retain only expandable aliases or ordinals to prevent their expansion in a SQL call expr.
+    final Set<SqlNode> aliasOrdinalExpandSet = Sets.newIdentityHashSet();
 
     ExtendedExpander(SqlValidatorImpl validator, SqlValidatorScope scope,
         SqlSelect select, SqlNode root, Clause clause) {
@@ -7293,6 +7428,9 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
       this.select = select;
       this.root = root;
       this.clause = clause;
+      if (clause == Clause.GROUP_BY) {
+        addExpandableExpressions();
+      }
     }
 
     @Override public @Nullable SqlNode visit(SqlIdentifier id) {
@@ -7301,7 +7439,7 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
       }
 
       final boolean replaceAliases = clause.shouldReplaceAliases(validator.config);
-      if (!replaceAliases) {
+      if (!replaceAliases || (clause == Clause.GROUP_BY && !aliasOrdinalExpandSet.contains(id))) {
         final SelectScope scope = validator.getRawSelectScopeNonNull(select);
         SqlNode node = expandCommonColumn(select, id, scope, validator);
         if (node != id) {
@@ -7352,24 +7490,7 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
           || !validator.config().conformance().isGroupByOrdinal()) {
         return super.visit(literal);
       }
-      boolean isOrdinalLiteral = literal == root;
-      switch (root.getKind()) {
-      case GROUPING_SETS:
-      case ROLLUP:
-      case CUBE:
-        if (root instanceof SqlBasicCall) {
-          List<SqlNode> operandList = ((SqlBasicCall) root).getOperandList();
-          for (SqlNode node : operandList) {
-            if (node.equals(literal)) {
-              isOrdinalLiteral = true;
-              break;
-            }
-          }
-        }
-        break;
-      default:
-        break;
-      }
+      boolean isOrdinalLiteral = aliasOrdinalExpandSet.contains(literal);
       if (isOrdinalLiteral) {
         switch (literal.getTypeName()) {
         case DECIMAL:
@@ -7393,6 +7514,49 @@ public class SqlValidatorImpl implements SqlValidatorWithHints {
       }
 
       return super.visit(literal);
+    }
+
+    /**
+     * Add all possible expandable 'group by' expression to set, which is
+     * used to check whether expr could be expanded as alias or ordinal.
+     */
+    @RequiresNonNull({"root"})
+    private void addExpandableExpressions(@UnknownInitialization ExtendedExpander this) {
+      switch (root.getKind()) {
+      case IDENTIFIER:
+      case LITERAL:
+        aliasOrdinalExpandSet.add(root);
+        break;
+      case GROUPING_SETS:
+      case ROLLUP:
+      case CUBE:
+        if (root instanceof SqlBasicCall) {
+          List<SqlNode> operandList = ((SqlBasicCall) root).getOperandList();
+          for (SqlNode sqlNode : operandList) {
+            addIdentifierOrdinal2ExpandSet(sqlNode);
+          }
+        }
+        break;
+      default:
+        break;
+      }
+    }
+
+    /**
+     * Identifier or literal in grouping sets, rollup, cube will be eligible for alias.
+     *
+     * @param sqlNode expression within grouping sets, rollup, cube
+     */
+    private void addIdentifierOrdinal2ExpandSet(@UnknownInitialization ExtendedExpander this,
+        SqlNode sqlNode) {
+      if (sqlNode.getKind() == SqlKind.ROW) {
+        List<SqlNode> rowOperandList = ((SqlCall) sqlNode).getOperandList();
+        for (SqlNode node : rowOperandList) {
+          addIdentifierOrdinal2ExpandSet(node);
+        }
+      } else if (sqlNode.getKind() == SqlKind.IDENTIFIER || sqlNode.getKind() == SqlKind.LITERAL) {
+        aliasOrdinalExpandSet.add(sqlNode);
+      }
     }
 
     /**
